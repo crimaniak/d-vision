@@ -1,0 +1,7 @@
+{
+	"name" : "d-vision",
+	"description" : "D-vision experimental libraries project",
+	"dependencies" : {
+		"pegged": "~>0.4.1"
+	}
+}
