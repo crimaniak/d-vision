@@ -1,7 +1,16 @@
 {
-	"name" : "d-vision",
-	"description" : "D-vision experimental libraries project",
-	"dependencies" : {
-		"pegged": "~>0.4.1"
-	}
+  "name" : "d-vision",
+  "description" : "D-vision experimental libraries project",
+  "configurations": [
+     {
+	"name": "default",
+	"targetType": "library"
+     }
+  ],
+
+  "dependencies" : {
+    "pegged": "~>0.4.1",
+    "vibe-d": "~>0.8.1"
+  },
+  "versions": ["VibeDefaultMain"]
 }
