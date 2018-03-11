@@ -1,6 +1,9 @@
 module vision.eventbus;
 
+import core.time : msecs, seconds, Duration;
 import vibe.core.task;
+import vibe.core.core : sleep;
+import std.conv : to;
 
 /**
  * Struct to identify subscribed task by cached hash string
@@ -33,8 +36,8 @@ struct SubscriberIdent
 struct Subscription
 {
     SubscriberIdent subscriber; ///< subscriber 
-    shared Bus bus;             ///< bus subscribed to
-    
+    shared Bus bus; ///< bus subscribed to
+
     /// Subscribe task to bus
     this(Task task, shared Bus bus)
     {
@@ -48,7 +51,7 @@ struct Subscription
         bus.unsubscribe(subscriber);
     }
 
-	/// Gate for bus emit method
+    /// Gate for bus emit method
     public void emit(EventType)(EventType event)
     {
         bus.emit(event);
@@ -60,14 +63,24 @@ struct Subscription
  */
 synchronized class Bus
 {
-	// Bus events
-    struct SubscribeEvent { Task subscriber; }
-    struct UnsubscribeEvent { Task subscriber; }
-    immutable struct StopEvent {};
-    
+    // Bus events
+    struct SubscribeEvent
+    {
+        Task subscriber;
+    }
+
+    struct UnsubscribeEvent
+    {
+        Task subscriber;
+    }
+
+    struct StopEvent
+    {
+    };
+
     private SubscriberIdent[string] subscribers;
 
-	/// Emit stop event for bus
+    /// Emit stop event for bus
     void stop()
     {
         emit(StopEvent());
@@ -76,51 +89,55 @@ synchronized class Bus
     ~this()
     {
         stop;
+        while (subscribers.length)
+            sleep(50.msecs); // can't do subscribers.values[0].task.join; because of sharedness problems
     }
 
-	/// Get number of tasks substribed for this bus
+    /// Get number of tasks substribed for this bus
     ulong tasksAmount() const
     {
         return subscribers.length;
     }
 
-	/// Emit event for bus
+    /// Emit event for bus
     void emit(EventType)(EventType event) @trusted
     {
         import vibe.core.concurrency : send;
         import std.traits : Unqual;
 
-        auto sharedEvent = cast(shared Unqual!EventType) event;
+        shared(Unqual!EventType) sharedEvent = cast(shared Unqual!EventType) event;
 
         foreach (ref subscriber; subscribers)
+        {
             subscriber.task.send(sharedEvent);
+        }
     }
 
-	/// Subscribe current task for this bus
+    /// Subscribe current task for this bus
     Subscription subscribeMe()
     {
         return subscribe(Task.getThis());
     }
 
-	/// Subscribe given task for this bus
+    /// Subscribe given task for this bus
     Subscription subscribe(Task subscriberTask)
     {
         return Subscription(subscriberTask, this);
     }
 
-	/// Subscrube subscriber for this bus
+    /// Subscrube subscriber for this bus
     void subscribe(SubscriberIdent subscriber)
     {
         subscribers[subscriber.id] = subscriber;
     }
 
-	/// Unsubscrube subscriber from this bus
+    /// Unsubscrube subscriber from this bus
     void unsubscribe(SubscriberIdent subscriber)
     {
         subscribers.remove(subscriber.id);
     }
 
-	/// check if given task is subscribed for this bus
+    /// check if given task is subscribed for this bus
     bool subscribed(Task task)
     {
         immutable id = SubscriberIdent(task).id;
@@ -144,27 +161,49 @@ Task subscribeDelegates(D...)(shared Bus bus, D delegates)
         bool exit = false;
 
         while (!exit)
-            receive((shared Bus.StopEvent e) {
-                exit = true;
-            }, delegates);
+            receive((shared(Bus.StopEvent) e) { exit = true; }, delegates);
     });
+}
+
+/**
+ * Receive events until timeout is reached or provided delegate will return true.
+ * Used to wait for specific event.
+ * If you interested in events of different types use Variant for delegate parameter.
+ */
+bool receiveTimeoutUntil(T)(Duration timeout, T op)
+{
+    import core.time: MonoTime;
+    import std.traits: Parameters;
+    import vibe.core.concurrency : receiveTimeout;
+
+    MonoTime end = MonoTime.currTime() + timeout;
+
+    bool result = false;
+
+    while (!result)
+        if (!receiveTimeout(end - MonoTime.currTime(), (Parameters!op event) {
+                result = op(event);
+            }))
+            break;
+            
+    return result;
 }
 
 unittest
 {
     import vibe.core.concurrency;
-    import vibe.core.core;
-    import core.time : msecs;
     import std.range : iota;
     import std.typecons : scoped;
     import std.variant;
     import std.stdio;
+    import std.conv : to;
+    import vibe.core.core : yield, runTask;
 
-	// create bus
+    // create bus
     shared Bus bus = new shared Bus();
     scope (exit)
         bus.destroy;
-    
+
     // custom events for test    
     struct Custom1
     {
@@ -181,47 +220,34 @@ unittest
         string[] a;
     }
 
-	// subscribe logger
-    auto logger = bus.subscribeDelegates((Variant e) {
-        writeln("Arrived: ", e);
-        stdout.flush;
-    });
-
-    enum TASKS = 100;
-
-	// subscribe custom listeners
-    foreach (i; iota(0, TASKS))
-        bus.subscribeDelegates
-	        ((shared Custom1 e) {
-	            writeln("c1:", e);
-	            stdout.flush;
-	        }
-	        ,(shared Custom2 e) { 
-	        	writeln("c2:", e); 
-	        	stdout.flush; 
-	        });
-    /*
-    runTask((){
-      auto subscription = bus.subscribeMe();
-
-      bool exit = false;
-
-      while(!exit) receive(
-        (Custom1 e){ writeln(e);stdout.flush; },
-        (Custom2 e){ writeln(e);stdout.flush; },
-        (Bus.StopEvent e){
-          bus.emit(Custom2("task exit"));
-          exit = true;
+    // subscribe logger
+    version (none) auto logger = bus.subscribeDelegates((Variant e) {
+        debug
+        {
+            writeln("Arrived: ", e);
+            stdout.flush;
         }
-      );
     });
-*/
-    sleep(100.msecs);
-    assert(bus.tasksAmount() == TASKS + 1);
 
-	// generate random events
+    enum TASKS = 2;
+    enum EVENTS = 50;
+
+    int[3] eventAmount;
+
+    // subscribe custom listeners
+    foreach (i; iota(0, TASKS))
+        bus.subscribeDelegates((shared Custom1 e) { ++eventAmount[0]; }, (shared Custom2 e) {
+            ++eventAmount[1];
+        }, (shared Custom3 e) { ++eventAmount[2]; });
+
+    yield();
+    assert(bus.tasksAmount() == TASKS,
+            "Expected " ~ TASKS.to!string ~ " tasks, in fact " ~ bus.tasksAmount().to!string);
+
+    // generate random events
     import std.random;
-    foreach (i; iota(1, 50))
+
+    foreach (i; iota(0, EVENTS))
     {
         switch (uniform(1, 4))
         {
@@ -239,12 +265,63 @@ unittest
         }
     }
 
-    import vibe.core.core : yield;
+    bus.destroy;
 
-    bus.stop;
+    import std.algorithm : sum;
 
-    sleep(100.msecs); // don't help
-    yield();		  // don't help
-    logger.join();	  // stopped is here because StopEvent is not detected by receive() I think
+    assert(eventAmount[].sum == EVENTS * TASKS);
 
+    /*/
+	import std.stdio;
+
+	struct Ping
+	{
+		int n;
+	}
+	struct Pong
+	{
+		int n;
+	}
+
+	// another test
+
+	writeln("New bus");stdout.flush;
+	bus = new shared Bus();
+
+	auto rr = bus.subscribeDelegates((shared Ping p){ sleep(1.seconds); if(p.n<4) bus.emit(Pong(p.n)); });
+
+	bus.emit(shared Pong(555));
+
+
+	runTask(()
+	{
+		for(int i=1000;i<1010;++i)
+		{
+			bus.emit(shared Pong(i));
+			sleep(500.msecs);
+		}
+	});
+
+
+	auto s = runTask(() 
+	{
+        	auto subscription = bus.subscribeMe();
+
+        	bool exit = false;
+
+		for(int cnt=1; cnt<5; ++cnt)
+		{
+			bus.emit(shared Ping(cnt));
+			writeln("emit Ping(",cnt,")");
+			if(!receiveTimeoutUntil(2.seconds, (shared Pong p){writeln("recv Pong(",p.n,")"); return p.n == cnt;}))
+			{
+				writeln("exit by timeout");
+				break;
+			}
+		}
+	});
+
+	s.join();
+	bus.destroy;
+	//*/
 }
